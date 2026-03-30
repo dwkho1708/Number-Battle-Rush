@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Number Battle Rush</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #000;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      overflow: hidden;
+      font-family: 'Arial', sans-serif;
+      touch-action: none;
+    }
+    canvas {
+      display: block;
+      cursor: pointer;
+      image-rendering: pixelated;
+    }
+  </style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+'use strict';
+
+// ── Canvas Setup ────────────────────────────────────────────────────────────
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+const W = 400;
+const H = 700;
+canvas.width = W;
+canvas.height = H;
+
+// Scale canvas to fit screen
+function resize() {
+  const scale = Math.min(window.innerWidth / W, window.innerHeight / H);
+  canvas.style.width  = (W * scale) + 'px';
+  canvas.style.height = (H * scale) + 'px';
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ── Constants ───────────────────────────────────────────────────────────────
+const LANE_COUNT   = 3;
+const LANE_W       = W / LANE_COUNT;
+const LANE_CX      = [LANE_W * 0.5, LANE_W * 1.5, LANE_W * 2.5];
+const PLAYER_Y     = H * 0.76;
+const GAME_SECS    = 25;
+const PLAYER_R     = 28;
+
+// Tile operator colours
+const OP_STYLE = {
+  '+': { fill: '#00ff88', dark: '#003319', shadow: '#00ff88' },
+  '×': { fill: '#ffcc00', dark: '#3d2e00', shadow: '#ffcc00' },
+  '-': { fill: '#ff5555', dark: '#3d0000', shadow: '#ff5555' },
+};
+
+// ── State ────────────────────────────────────────────────────────────────────
+let state       = 'MENU'; // MENU | RUNNING | BOSS | RESULT
+let playerLane  = 1;
+let playerX     = LANE_CX[1];
+let targetX     = LANE_CX[1];
+let playerNum   = 1;
+let tiles       = [];
+let particles   = [];
+let elapsed     = 0;
+let spawnCd     = 1.0;
+let roadOff     = 0;
+let lastTs      = 0;
+
+// Boss state
+let bossHP      = 0;
+let bossPhase   = 'intro'; // intro | compare | result
+let bossTimer   = 0;
+let resultWin   = false;
+
+// Best score
+let bestScore   = 0;
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function lerp(a, b, t) { return a + (b - a) * t; }
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+function randInt(lo, hi) { return lo + Math.floor(Math.random() * (hi - lo + 1)); }
+
+function roundRect(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.arcTo(x + w, y, x + w, y + r, r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+  ctx.lineTo(x + r, y + h);
+  ctx.arcTo(x, y + h, x, y + h - r, r);
+  ctx.lineTo(x, y + r);
+  ctx.arcTo(x, y, x + r, y, r);
+  ctx.closePath();
+}
+
+// ── Game Logic ───────────────────────────────────────────────────────────────
+function resetGame() {
+  playerLane = 1;
+  playerX    = LANE_CX[1];
+  targetX    = LANE_CX[1];
+  playerNum  = 1;
+  tiles      = [];
+  particles  = [];
+  elapsed    = 0;
+  spawnCd    = 0.5;
+  roadOff    = 0;
+  state      = 'RUNNING';
+}
+
+function spawnTile() {
+  const lane = randInt(0, 2);
+  // weighted: more + and ×, less -
+  const roll = Math.random();
+  let op, val;
+  if (roll < 0.45) {
+    op = '+'; val = randInt(1, 10);
+  } else if (roll < 0.75) {
+    op = '×'; val = randInt(2, 4);
+  } else {
+    op = '-'; val = randInt(1, 6);
+  }
+  tiles.push({ lane, x: LANE_CX[lane], y: -50, op, val, alpha: 1, scale: 1, dead: false });
+}
+
+function applyTile(t) {
+  if (t.op === '+') playerNum += t.val;
+  else if (t.op === '×') playerNum *= t.val;
+  else playerNum = Math.max(1, playerNum - t.val);
+  playerNum = Math.min(playerNum, 99999);
+
+  // burst particles
+  const style = OP_STYLE[t.op];
+  for (let i = 0; i < 10; i++) {
+    const angle = (Math.random() * Math.PI * 2);
+    const speed = 2 + Math.random() * 4;
+    particles.push({
+      x: t.x, y: t.y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - 2,
+      color: style.fill,
+      life: 1,
+      size: 3 + Math.random() * 4,
+    });
+  }
+}
+
+function startBoss() {
+  // Boss HP is somewhat competitive with player
+  bossHP    = Math.floor(playerNum * (0.6 + Math.random() * 0.8) + randInt(20, 80));
+  bossHP    = clamp(bossHP, 10, 99999);
+  bossPhase = 'intro';
+  bossTimer = 0;
+  tiles     = [];
+  particles = [];
+  state     = 'BOSS';
+}
+
+function updateRunning(dt) {
+  elapsed += dt;
+  roadOff  = (roadOff + 280 * dt) % 60;
+
+  // Smooth lane transition
+  playerX = lerp(playerX, targetX, 0.18);
+
+  // Spawn
+  spawnCd -= dt;
+  if (spawnCd <= 0) {
+    spawnTile();
+    spawnCd = Math.max(0.35, 1.0 - elapsed * 0.018);
+  }
+
+  // Tile update
+  const speed = 220 + elapsed * 4;
+  for (let i = tiles.length - 1; i >= 0; i--) {
+    const t = tiles[i];
+    if (t.dead) {
+      t.scale += 3.5 * dt;
+      t.alpha -= 4 * dt;
+      if (t.alpha <= 0) { tiles.splice(i, 1); continue; }
+      continue;
+    }
+    t.y += speed * dt;
+
+    // Collect check
+    if (Math.abs(t.y - PLAYER_Y) < 38 && Math.abs(t.x - playerX) < 42) {
+      t.dead = true;
+      applyTile(t);
+    }
+
+    if (t.y > H + 60) tiles.splice(i, 1);
+  }
+
+  // Particles
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x  += p.vx;
+    p.y  += p.vy;
+    p.vy += 0.12;
+    p.life -= 2.2 * dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+
+  if (elapsed >= GAME_SECS) startBoss();
+}
+
+function updateBoss(dt) {
+  bossTimer += dt;
+  if (bossPhase === 'intro'   && bossTimer > 1.8) { bossPhase = 'compare'; bossTimer = 0; }
+  if (bossPhase === 'compare' && bossTimer > 1.8) { bossPhase = 'result';  bossTimer = 0; resultWin = playerNum >= bossHP; }
+  if (bossPhase === 'result'  && bossTimer > 2.5) {
+    bestScore = Math.max(bestScore, playerNum);
+    state = 'RESULT';
+  }
+}
+
+// ── Input ────────────────────────────────────────────────────────────────────
+function moveLane(dir) {
+  if (state !== 'RUNNING') return;
+  playerLane = clamp(playerLane + dir, 0, 2);
+  targetX    = LANE_CX[playerLane];
+}
+
+function tapLane(canvasX) {
+  if (state !== 'RUNNING') return;
+  playerLane = clamp(Math.floor(canvasX / LANE_W), 0, 2);
+  targetX    = LANE_CX[playerLane];
+}
+
+document.addEventListener('keydown', e => {
+  if (state === 'MENU')   { resetGame(); return; }
+  if (state === 'RESULT') { state = 'MENU'; return; }
+  if (state !== 'RUNNING') return;
+  if (e.key === 'ArrowLeft')  moveLane(-1);
+  if (e.key === 'ArrowRight') moveLane(+1);
+});
+
+let touchSX = 0;
+canvas.addEventListener('touchstart', e => {
+  touchSX = e.touches[0].clientX;
+  e.preventDefault();
+}, { passive: false });
+
+canvas.addEventListener('touchend', e => {
+  const dx = e.changedTouches[0].clientX - touchSX;
+  if (state === 'MENU')   { resetGame(); return; }
+  if (state === 'RESULT') { state = 'MENU'; return; }
+  if (state !== 'RUNNING') return;
+
+  if (Math.abs(dx) < 25) {
+    const rect   = canvas.getBoundingClientRect();
+    const scaleX = W / rect.width;
+    const cx     = (e.changedTouches[0].clientX - rect.left) * scaleX;
+    tapLane(cx);
+  } else {
+    moveLane(dx < 0 ? -1 : 1);
+  }
+  e.preventDefault();
+}, { passive: false });
+
+canvas.addEventListener('click', e => {
+  if (state === 'MENU')   { resetGame(); return; }
+  if (state === 'RESULT') { state = 'MENU'; return; }
+  if (state !== 'RUNNING') return;
+  const rect   = canvas.getBoundingClientRect();
+  const scaleX = W / rect.width;
+  const cx     = (e.clientX - rect.left) * scaleX;
+  tapLane(cx);
+});
+
+// ── Draw helpers ─────────────────────────────────────────────────────────────
+function drawRoad() {
+  // Background gradient
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#080818');
+  bg.addColorStop(1, '#0e0e2a');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  // Lane dividers (dashed)
+  ctx.save();
+  ctx.strokeStyle = '#2233557a';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([18, 18]);
+  for (let i = 1; i < LANE_COUNT; i++) {
+    ctx.lineDashOffset = -roadOff;
+    ctx.beginPath();
+    ctx.moveTo(i * LANE_W, 0);
+    ctx.lineTo(i * LANE_W, H);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.restore();
+
+  // Road speed lines
+  ctx.strokeStyle = '#ffffff08';
+  ctx.lineWidth = 3;
+  for (let y = (-roadOff % 60) - 60; y < H; y += 60) {
+    for (let lx of LANE_CX) {
+      ctx.beginPath();
+      ctx.moveTo(lx, y);
+      ctx.lineTo(lx, y + 28);
+      ctx.stroke();
+    }
+  }
+
+  // Side glow borders
+  const borderGrad = ctx.createLinearGradient(0, 0, 0, H);
+  borderGrad.addColorStop(0, '#4455ff');
+  borderGrad.addColorStop(1, '#220044');
+  ctx.strokeStyle = borderGrad;
+  ctx.lineWidth = 4;
+  ctx.shadowColor = '#4455ff';
+  ctx.shadowBlur = 12;
+  ctx.beginPath();
+  ctx.moveTo(2, 0); ctx.lineTo(2, H);
+  ctx.moveTo(W - 2, 0); ctx.lineTo(W - 2, H);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+}
+
+function drawTile(t) {
+  const s = OP_STYLE[t.op];
+  ctx.save();
+  ctx.globalAlpha = t.alpha;
+  ctx.translate(t.x, t.y);
+  ctx.scale(t.scale, t.scale);
+
+  const tw = 68, th = 48;
+  ctx.shadowColor = s.shadow;
+  ctx.shadowBlur  = 14;
+
+  roundRect(-tw / 2, -th / 2, tw, th, 9);
+  ctx.fillStyle = s.dark;
+  ctx.fill();
+  ctx.strokeStyle = s.fill;
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = s.fill;
+  ctx.font = 'bold 22px Arial';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(`${t.op}${t.val}`, 0, 0);
+
+  ctx.restore();
+}
+
+function drawPlayer() {
+  ctx.save();
+  ctx.translate(playerX, PLAYER_Y);
+
+  // Pulse ring
+  const pulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.004);
+  ctx.strokeStyle = `rgba(100,200,255,${0.2 + 0.2 * pulse})`;
+  ctx.lineWidth = 2;
+  ctx.shadowColor = '#44aaff';
+  ctx.shadowBlur = 16;
+  ctx.beginPath();
+  ctx.arc(0, 0, PLAYER_R + 8 + pulse * 6, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Body
+  const grad = ctx.createRadialGradient(0, -6, 4, 0, 0, PLAYER_R);
+  grad.addColorStop(0, '#88eeff');
+  grad.addColorStop(1, '#0055cc');
+  ctx.fillStyle = grad;
+  ctx.shadowColor = '#00aaff';
+  ctx.shadowBlur = 22;
+  ctx.beginPath();
+  ctx.arc(0, 0, PLAYER_R, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.strokeStyle = '#aaddff';
+  ctx.lineWidth = 2;
+  ctx.shadowBlur = 0;
+  ctx.stroke();
+
+  // Number inside
+  const numStr = String(playerNum);
+  const fs = numStr.length >= 5 ? 12 : numStr.length >= 4 ? 14 : numStr.length >= 3 ? 16 : 20;
+  ctx.fillStyle = '#ffffff';
+  ctx.font = `bold ${fs}px Arial`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(numStr, 0, 0);
+
+  ctx.restore();
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    ctx.save();
+    ctx.globalAlpha = p.life * 0.9;
+    ctx.fillStyle   = p.color;
+    ctx.shadowColor = p.color;
+    ctx.shadowBlur  = 6;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawHUD() {
+  // Timer bar bg
+  const bx = 15, by = 12, bw = W - 30, bh = 10;
+  ctx.fillStyle = '#1a1a3a';
+  roundRect(bx, by, bw, bh, 5);
+  ctx.fill();
+
+  const progress = clamp(1 - elapsed / GAME_SECS, 0, 1);
+  const barColor = progress > 0.5 ? '#00ff88' : progress > 0.25 ? '#ffcc00' : '#ff5555';
+  ctx.fillStyle = barColor;
+  ctx.shadowColor = barColor;
+  ctx.shadowBlur = 8;
+  if (progress > 0) {
+    roundRect(bx, by, bw * progress, bh, 5);
+    ctx.fill();
+  }
+  ctx.shadowBlur = 0;
+
+  // Countdown
+  const secsLeft = Math.ceil(clamp(GAME_SECS - elapsed, 0, GAME_SECS));
+  ctx.fillStyle = '#9999cc';
+  ctx.font = '11px Arial';
+  ctx.textAlign = 'right';
+  ctx.fillText(`${secsLeft}s`, W - 15, by - 1);
+
+  // Player number (large, top left)
+  ctx.fillStyle = '#ffffff';
+  ctx.shadowColor = '#4488ff';
+  ctx.shadowBlur = 12;
+  ctx.font = 'bold 30px Arial';
+  ctx.textAlign = 'left';
+  ctx.fillText(`⚡ ${playerNum}`, 15, 50);
+  ctx.shadowBlur = 0;
+
+  // Lane highlight stripe
+  const ly = H - 60;
+  for (let i = 0; i < LANE_COUNT; i++) {
+    ctx.fillStyle = i === playerLane ? '#ffffff18' : '#ffffff07';
+    roundRect(i * LANE_W + 4, ly, LANE_W - 8, 5, 3);
+    ctx.fill();
+  }
+}
+
+function drawMenu() {
+  // Background
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#080818');
+  bg.addColorStop(1, '#0e0e2a');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  // Moving lane lines in background
+  ctx.strokeStyle = '#1a1a3a';
+  ctx.lineWidth = 2;
+  for (let i = 1; i < 3; i++) {
+    ctx.beginPath();
+    ctx.moveTo(i * LANE_W, 0);
+    ctx.lineTo(i * LANE_W, H);
+    ctx.stroke();
+  }
+
+  // Title
+  ctx.save();
+  ctx.textAlign = 'center';
+
+  ctx.shadowColor = '#00aaff';
+  ctx.shadowBlur = 30;
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 40px Arial';
+  ctx.fillText('NUMBER BATTLE', W / 2, 140);
+
+  ctx.shadowColor = '#ffcc00';
+  ctx.shadowBlur = 25;
+  ctx.fillStyle = '#ffcc00';
+  ctx.font = 'bold 52px Arial';
+  ctx.fillText('RUSH!', W / 2, 202);
+  ctx.shadowBlur = 0;
+
+  // Subtitle
+  ctx.fillStyle = '#8888bb';
+  ctx.font = '16px Arial';
+  ctx.fillText('타일을 수집해 숫자를 키워라!', W / 2, 240);
+  ctx.fillText('보스를 이기면 승리!', W / 2, 264);
+
+  // Tile preview
+  const ops = [
+    { op: '+', val: 5, x: W / 2 - 95 },
+    { op: '×', val: 3, x: W / 2 },
+    { op: '-', val: 2, x: W / 2 + 95 },
+  ];
+  for (const o of ops) {
+    const s = OP_STYLE[o.op];
+    ctx.save();
+    ctx.translate(o.x, 330);
+    ctx.shadowColor = s.shadow;
+    ctx.shadowBlur = 10;
+    roundRect(-32, -24, 64, 48, 8);
+    ctx.fillStyle = s.dark;
+    ctx.fill();
+    ctx.strokeStyle = s.fill;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = s.fill;
+    ctx.font = 'bold 22px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`${o.op}${o.val}`, 0, 0);
+    ctx.restore();
+  }
+
+  // Controls info
+  ctx.fillStyle = '#555577';
+  ctx.font = '13px Arial';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText('← → 키 또는 화면 탭/스와이프', W / 2, 385);
+
+  // Best score
+  if (bestScore > 0) {
+    ctx.fillStyle = '#ffcc0088';
+    ctx.font = '14px Arial';
+    ctx.fillText(`최고 기록: ${bestScore}`, W / 2, 410);
+  }
+
+  // Start button
+  const bw = 190, bh = 54;
+  const bx = W / 2 - bw / 2, by = 445;
+  ctx.shadowColor = '#0055ff';
+  ctx.shadowBlur  = 22;
+  roundRect(bx, by, bw, bh, 12);
+  ctx.fillStyle = '#1133cc';
+  ctx.fill();
+  ctx.strokeStyle = '#6699ff';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 24px Arial';
+  ctx.fillText('START', W / 2, by + 35);
+
+  ctx.restore();
+}
+
+function drawBoss() {
+  // Dark bg
+  ctx.fillStyle = '#080812';
+  ctx.fillRect(0, 0, W, H);
+
+  const t = bossTimer;
+  const bob = Math.sin(Date.now() * 0.003) * 6;
+
+  // BOSS! title
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.shadowColor = '#ff2222';
+  ctx.shadowBlur = 30;
+  ctx.fillStyle = '#ff5555';
+  ctx.font = 'bold 52px Arial';
+  ctx.fillText('BOSS!!', W / 2, 80);
+  ctx.shadowBlur = 0;
+
+  // Boss face
+  const bx = W / 2, by2 = 210 + bob;
+  // Body
+  const bodyGrad = ctx.createRadialGradient(bx - 15, by2 - 20, 10, bx, by2, 75);
+  bodyGrad.addColorStop(0, '#550011');
+  bodyGrad.addColorStop(1, '#220008');
+  ctx.fillStyle = bodyGrad;
+  ctx.shadowColor = '#ff0000';
+  ctx.shadowBlur = 35;
+  ctx.beginPath();
+  ctx.arc(bx, by2, 75, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#ff4444';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // Eyes
+  ctx.fillStyle = '#ff2200';
+  ctx.shadowColor = '#ff0000';
+  ctx.shadowBlur = 15;
+  ctx.beginPath(); ctx.ellipse(bx - 22, by2 - 18, 14, 10, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(bx + 22, by2 - 18, 14, 10, 0, 0, Math.PI * 2); ctx.fill();
+  // Pupils
+  ctx.fillStyle = '#ffff00';
+  ctx.shadowBlur = 0;
+  ctx.beginPath(); ctx.arc(bx - 20, by2 - 18, 5, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(bx + 24, by2 - 18, 5, 0, Math.PI * 2); ctx.fill();
+  // Mouth
+  ctx.strokeStyle = '#ff4444';
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.arc(bx, by2 + 15, 28, 0.15 * Math.PI, 0.85 * Math.PI);
+  ctx.stroke();
+
+  // HP number inside boss
+  ctx.fillStyle = '#ffcccc';
+  ctx.font = `bold ${String(bossHP).length >= 5 ? 20 : 26}px Arial`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(bossHP, bx, by2 + 28);
+
+  // HP label
+  ctx.fillStyle = '#ff8888';
+  ctx.font = '16px Arial';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText('BOSS HP', bx, by2 + 85);
+
+  // Phase: compare
+  if (bossPhase !== 'intro') {
+    const showProgress = Math.min(1, t / 0.5);
+
+    // VS text
+    ctx.globalAlpha = showProgress;
+    ctx.fillStyle = '#ffffff';
+    ctx.shadowColor = '#ffffff';
+    ctx.shadowBlur = 10;
+    ctx.font = 'bold 40px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText('VS', W / 2, H / 2 + 30);
+    ctx.shadowBlur = 0;
+
+    // Player bubble
+    const py = H / 2 + 110;
+    const pgrad = ctx.createRadialGradient(W / 2 - 15, py - 20, 5, W / 2, py, 52);
+    pgrad.addColorStop(0, '#88eeff');
+    pgrad.addColorStop(1, '#0055cc');
+    ctx.fillStyle = pgrad;
+    ctx.shadowColor = '#00aaff';
+    ctx.shadowBlur = 20;
+    ctx.beginPath();
+    ctx.arc(W / 2, py, 52, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#aaddff';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    const ns = String(playerNum);
+    const fs = ns.length >= 5 ? 16 : ns.length >= 4 ? 20 : ns.length >= 3 ? 24 : 28;
+    ctx.fillStyle = '#ffffff';
+    ctx.font = `bold ${fs}px Arial`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(playerNum, W / 2, py);
+
+    ctx.fillStyle = '#88aaff';
+    ctx.font = '16px Arial';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText('내 숫자', W / 2, py + 68);
+    ctx.globalAlpha = 1;
+  }
+
+  // Phase: result
+  if (bossPhase === 'result') {
+    const win = playerNum >= bossHP;
+    ctx.shadowColor = win ? '#00ff88' : '#ff5555';
+    ctx.shadowBlur  = 35;
+    ctx.fillStyle   = win ? '#00ff88' : '#ff5555';
+    ctx.font = 'bold 58px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText(win ? '승리!' : '패배...', W / 2, H - 60);
+    ctx.shadowBlur = 0;
+  }
+
+  ctx.restore();
+}
+
+function drawResult() {
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#080818');
+  bg.addColorStop(1, '#0e0e2a');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.save();
+  ctx.textAlign = 'center';
+
+  if (resultWin) {
+    ctx.shadowColor = '#00ff88';
+    ctx.shadowBlur  = 35;
+    ctx.fillStyle   = '#00ff88';
+    ctx.font = 'bold 72px Arial';
+    ctx.fillText('WIN!', W / 2, 160);
+    ctx.shadowBlur = 0;
+
+    // Stars
+    const starY = 220;
+    ctx.font = '48px Arial';
+    ctx.fillText('⭐⭐⭐', W / 2, starY);
+  } else {
+    ctx.shadowColor = '#ff5555';
+    ctx.shadowBlur  = 35;
+    ctx.fillStyle   = '#ff5555';
+    ctx.font = 'bold 72px Arial';
+    ctx.fillText('LOSE...', W / 2, 160);
+    ctx.shadowBlur = 0;
+  }
+
+  // Score breakdown
+  const boxY = 270;
+  roundRect(40, boxY, W - 80, 180, 14);
+  ctx.fillStyle = '#13133a';
+  ctx.fill();
+  ctx.strokeStyle = resultWin ? '#00ff8866' : '#ff555566';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  ctx.fillStyle = '#aaaadd';
+  ctx.font = '17px Arial';
+  ctx.textBaseline = 'alphabetic';
+
+  ctx.fillStyle = '#88aaff';
+  ctx.fillText('내 숫자', W / 2, boxY + 45);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 36px Arial';
+  ctx.fillText(playerNum, W / 2, boxY + 88);
+
+  ctx.fillStyle = '#ff8888';
+  ctx.font = '17px Arial';
+  ctx.fillText('BOSS HP', W / 2, boxY + 120);
+  ctx.font = 'bold 28px Arial';
+  ctx.fillText(bossHP, W / 2, boxY + 158);
+
+  // Diff
+  const diff = playerNum - bossHP;
+  ctx.fillStyle = diff >= 0 ? '#00ff88' : '#ff5555';
+  ctx.font = '15px Arial';
+  ctx.fillText(diff >= 0 ? `+${diff} 차이로 승리!` : `${diff} 차이로 패배`, W / 2, boxY + 185);
+
+  // Best
+  if (bestScore > 0) {
+    ctx.fillStyle = '#ffcc0099';
+    ctx.font = '14px Arial';
+    ctx.fillText(`최고 기록: ${bestScore}`, W / 2, boxY + 210);
+  }
+
+  // Retry button
+  const bw = 200, bh = 54;
+  const bx = W / 2 - bw / 2, by = H - 115;
+  ctx.shadowColor = '#4455ff';
+  ctx.shadowBlur = 18;
+  roundRect(bx, by, bw, bh, 12);
+  ctx.fillStyle = '#1a1a55';
+  ctx.fill();
+  ctx.strokeStyle = '#6677ff';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 22px Arial';
+  ctx.fillText('다시 하기', W / 2, by + 35);
+
+  ctx.restore();
+}
+
+// ── Main Loop ────────────────────────────────────────────────────────────────
+function loop(ts) {
+  const dt = Math.min((ts - lastTs) / 1000, 0.05);
+  lastTs = ts;
+
+  if      (state === 'MENU')    drawMenu();
+  else if (state === 'RUNNING') { updateRunning(dt); drawRoad(); tiles.forEach(drawTile); drawParticles(); drawPlayer(); drawHUD(); }
+  else if (state === 'BOSS')    { updateBoss(dt); drawBoss(); }
+  else if (state === 'RESULT')  drawResult();
+
+  requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(ts => { lastTs = ts; requestAnimationFrame(loop); });
+</script>
+</body>
+</html>
