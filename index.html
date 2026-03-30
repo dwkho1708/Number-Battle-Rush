@@ -83,6 +83,36 @@ let resultWin   = false;
 // Best score
 let bestScore   = 0;
 
+// ── Audio (Web Audio API — no external files) ──────────────────────────────
+let audioCtx = null;
+function ensureAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
+}
+
+function playTone(freq, dur, type, vol) {
+  const ctx = ensureAudio();
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = type || 'square';
+  osc.frequency.value = freq;
+  gain.gain.setValueAtTime(vol || 0.12, ctx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+  osc.start();
+  osc.stop(ctx.currentTime + dur);
+}
+
+function sfxCollectPlus()  { playTone(520, 0.12, 'square', 0.10); playTone(680, 0.10, 'square', 0.08); }
+function sfxCollectMul()   { playTone(600, 0.08, 'sine', 0.12); playTone(800, 0.08, 'sine', 0.10); playTone(1000, 0.10, 'sine', 0.08); }
+function sfxCollectMinus() { playTone(200, 0.15, 'sawtooth', 0.08); }
+function sfxBossIntro()    { playTone(150, 0.3, 'square', 0.10); playTone(200, 0.3, 'square', 0.08); }
+function sfxWin()          { [523,659,784,1047].forEach((f,i) => setTimeout(() => playTone(f, 0.2, 'sine', 0.12), i*100)); }
+function sfxLose()         { [300,250,200,150].forEach((f,i) => setTimeout(() => playTone(f, 0.25, 'sawtooth', 0.08), i*120)); }
+function sfxLaneSwitch()   { playTone(440, 0.05, 'sine', 0.06); }
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 function lerp(a, b, t) { return a + (b - a) * t; }
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
@@ -106,6 +136,7 @@ function roundRect(x, y, w, h, r) {
 
 // ── Game Logic ───────────────────────────────────────────────────────────────
 function resetGame() {
+  ensureAudio();
   playerLane = 1;
   playerX    = LANE_CX[1];
   targetX    = LANE_CX[1];
@@ -134,9 +165,9 @@ function spawnTile() {
 }
 
 function applyTile(t) {
-  if (t.op === '+') playerNum += t.val;
-  else if (t.op === '×') playerNum *= t.val;
-  else playerNum = Math.max(1, playerNum - t.val);
+  if (t.op === '+') { playerNum += t.val; sfxCollectPlus(); }
+  else if (t.op === '×') { playerNum *= t.val; sfxCollectMul(); }
+  else { playerNum = Math.max(1, playerNum - t.val); sfxCollectMinus(); }
   playerNum = Math.min(playerNum, 99999);
 
   // burst particles
@@ -164,6 +195,7 @@ function startBoss() {
   tiles     = [];
   particles = [];
   state     = 'BOSS';
+  sfxBossIntro();
 }
 
 function updateRunning(dt) {
@@ -217,7 +249,7 @@ function updateRunning(dt) {
 function updateBoss(dt) {
   bossTimer += dt;
   if (bossPhase === 'intro'   && bossTimer > 1.8) { bossPhase = 'compare'; bossTimer = 0; }
-  if (bossPhase === 'compare' && bossTimer > 1.8) { bossPhase = 'result';  bossTimer = 0; resultWin = playerNum >= bossHP; }
+  if (bossPhase === 'compare' && bossTimer > 1.8) { bossPhase = 'result';  bossTimer = 0; resultWin = playerNum >= bossHP; if (resultWin) sfxWin(); else sfxLose(); }
   if (bossPhase === 'result'  && bossTimer > 2.5) {
     bestScore = Math.max(bestScore, playerNum);
     state = 'RESULT';
@@ -227,14 +259,18 @@ function updateBoss(dt) {
 // ── Input ────────────────────────────────────────────────────────────────────
 function moveLane(dir) {
   if (state !== 'RUNNING') return;
+  const prev = playerLane;
   playerLane = clamp(playerLane + dir, 0, 2);
   targetX    = LANE_CX[playerLane];
+  if (playerLane !== prev) sfxLaneSwitch();
 }
 
 function tapLane(canvasX) {
   if (state !== 'RUNNING') return;
+  const prev = playerLane;
   playerLane = clamp(Math.floor(canvasX / LANE_W), 0, 2);
   targetX    = LANE_CX[playerLane];
+  if (playerLane !== prev) sfxLaneSwitch();
 }
 
 document.addEventListener('keydown', e => {
