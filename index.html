@@ -113,6 +113,75 @@ function sfxWin()          { [523,659,784,1047].forEach((f,i) => setTimeout(() =
 function sfxLose()         { [300,250,200,150].forEach((f,i) => setTimeout(() => playTone(f, 0.25, 'sawtooth', 0.08), i*120)); }
 function sfxLaneSwitch()   { playTone(440, 0.05, 'sine', 0.06); }
 
+// ── BGM (procedural chiptune loop) ─────────────────────────────────────────
+let bgmNodes = null;
+
+function startBGM(bpm, melody, bass, key) {
+  stopBGM();
+  const ctx = ensureAudio();
+  const masterGain = ctx.createGain();
+  masterGain.gain.value = 0.07;
+  masterGain.connect(ctx.destination);
+
+  const beatSec = 60 / bpm;
+  const loopLen = melody.length * beatSec;
+
+  // Melody oscillator (square wave — chiptune feel)
+  function scheduleLoop() {
+    const now = ctx.currentTime;
+    // melody voice
+    melody.forEach((note, i) => {
+      if (note === 0) return;
+      const osc = ctx.createOscillator();
+      const g = ctx.createGain();
+      osc.type = 'square';
+      osc.frequency.value = note;
+      g.gain.setValueAtTime(0.5, now + i * beatSec);
+      g.gain.exponentialRampToValueAtTime(0.01, now + (i + 0.9) * beatSec);
+      osc.connect(g);
+      g.connect(masterGain);
+      osc.start(now + i * beatSec);
+      osc.stop(now + (i + 0.95) * beatSec);
+    });
+    // bass voice
+    bass.forEach((note, i) => {
+      if (note === 0) return;
+      const osc = ctx.createOscillator();
+      const g = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.value = note;
+      g.gain.setValueAtTime(0.4, now + i * beatSec);
+      g.gain.exponentialRampToValueAtTime(0.01, now + (i + 0.9) * beatSec);
+      osc.connect(g);
+      g.connect(masterGain);
+      osc.start(now + i * beatSec);
+      osc.stop(now + (i + 0.95) * beatSec);
+    });
+  }
+
+  scheduleLoop();
+  const iv = setInterval(scheduleLoop, loopLen * 1000);
+  bgmNodes = { masterGain, interval: iv };
+}
+
+function stopBGM() {
+  if (bgmNodes) {
+    clearInterval(bgmNodes.interval);
+    bgmNodes.masterGain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
+    setTimeout(() => { try { bgmNodes.masterGain.disconnect(); } catch(e){} }, 400);
+    bgmNodes = null;
+  }
+}
+
+// C major pentatonic melodies
+const BGM_GAME_MELODY = [523,587,659,784,659,587,523,784, 659,523,587,659,784,659,523,0];
+const BGM_GAME_BASS   = [131,0,165,0,131,0,196,0, 131,0,165,0,196,0,131,0];
+const BGM_BOSS_MELODY = [330,0,392,330,294,0,330,392, 330,294,262,0,294,330,0,0];
+const BGM_BOSS_BASS   = [110,0,110,0,147,0,147,0, 110,0,110,0,147,0,110,0];
+
+function startGameBGM() { startBGM(180, BGM_GAME_MELODY, BGM_GAME_BASS); }
+function startBossBGM() { startBGM(140, BGM_BOSS_MELODY, BGM_BOSS_BASS); }
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 function lerp(a, b, t) { return a + (b - a) * t; }
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
@@ -147,6 +216,7 @@ function resetGame() {
   spawnCd    = 0.5;
   roadOff    = 0;
   state      = 'RUNNING';
+  startGameBGM();
 }
 
 function spawnTile() {
@@ -196,6 +266,7 @@ function startBoss() {
   particles = [];
   state     = 'BOSS';
   sfxBossIntro();
+  startBossBGM();
 }
 
 function updateRunning(dt) {
@@ -253,6 +324,7 @@ function updateBoss(dt) {
   if (bossPhase === 'result'  && bossTimer > 2.5) {
     bestScore = Math.max(bestScore, playerNum);
     state = 'RESULT';
+    stopBGM();
   }
 }
 
